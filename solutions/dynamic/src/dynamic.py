@@ -13,6 +13,12 @@ def binary(op, v1: int, v2: int) -> int | str:
                 return v1 // v2
             except ZeroDivisionError:
                 return "divide by zero"
+        case jvm.BinaryOpr.Add:
+            return v1 + v2
+        case jvm.BinaryOpr.Sub:
+            return v1 - v2
+        case jvm.BinaryOpr.Mul:
+            return v1 * v2
         case a:
             raise NotImplementedError(f"Unhandled binary {op!r}")
 
@@ -21,6 +27,16 @@ def compare(op, v1: int, v2: int) -> bool:
     match op:
         case jvm.CmpOpr.Eq:
             return v1 == v2
+        case jvm.CmpOpr.Ne:
+            return v1 != v2
+        case jvm.CmpOpr.Lt:
+            return v1 < v2
+        case jvm.CmpOpr.Le:
+            return v1 <= v2
+        case jvm.CmpOpr.Gt:
+            return v1 > v2
+        case jvm.CmpOpr.Ge:
+            return v1 >= v2
         case _:
             raise NotImplementedError(f"Unhandled comparation {op!r}")
 
@@ -36,8 +52,14 @@ def step(bc: jpamb.Bytecode, state: jvmc.State) -> tuple[jvmc.PC, jvmc.State | s
         case jvm.Push(type=t, value=v):
             if t is jvm.Int():
                 frame.stack.push(jvmc.StackInt(v))
+            # elif t is jvm.Char():
+            #     frame.stack.push(jvmc.StackChar(v))
+            elif t is jvm.Boolean():
+                frame.stack.push(jvmc.StackInt(1 if v else 0))
+            elif t is jvm.Reference():  
+                frame.stack.push(jvmc.StackReference(v))
             else:
-                raise NotImplementedError("Error")
+                raise NotImplementedError(f"Unhandled push type: {t} value: {v}")
             frame.pc += 1
 
         case jvm.Binary(type=jvm.Int(), operant=op):
@@ -54,15 +76,66 @@ def step(bc: jpamb.Bytecode, state: jvmc.State) -> tuple[jvmc.PC, jvmc.State | s
                 frame.pc += 1
 
         case jvm.Return(type=t):
-            if t is not None:
-                raise NotImplementedError("Still to be done")
+            if t is None:
+                v1 = jvmc.StackInt(0)
+            else:
+                v1 = frame.stack.pop()
+            assert isinstance(v1, jvmc.StackInt), f"expected int, but got {v1}"
 
             state.frames.pop()
-
             if state.frames:
-                raise NotImplementedError("Still to be done")
+                frame = state.frames.peek()
+                frame.stack.push(v1)
+                frame.pc += 1
             else:
                 output = "ok"
+
+        case jvm.Store(type=jvm.Reference(), index=n):
+            v = frame.stack.pop()
+            assert isinstance(v, jvmc.StackReference), f"expected reference, but got {v}"
+            frame.locals[n] = v
+            frame.pc += 1
+
+        case jvm.Store(type=jvm.Int(), index=n):
+            v = frame.stack.pop()
+            assert isinstance(v, jvmc.StackInt), f"expected int, but got {v}"
+            frame.locals[n] = v
+            frame.pc += 1
+
+        case jvm.ArrayStore(type=jvm.Int()):
+            value, index, ref = frame.stack.pop(), frame.stack.pop(), frame.stack.pop()
+            assert isinstance(value, jvmc.StackInt), f"expected int, but got {value}"
+            assert isinstance(index, jvmc.StackInt), f"expected int, but got {index}"
+            assert isinstance(ref, jvmc.StackReference), f"expected reference, but got {ref}"
+
+            if ref.value == 0:
+                output = "null pointer"
+            else:
+                array = state.heap[ref]
+                assert isinstance(array, jvmc.HeapArray), f"expected array, but got {array}"
+                if 0 <= index.value < len(array.values):
+                    array.values[index.value] = value.value
+                    frame.pc += 1
+                else:
+                    output = "out of bounds"
+
+        case jvm.ArrayLength():
+            ref = frame.stack.pop()
+            assert isinstance(ref, jvmc.StackReference), f"expected reference, but got {ref}"
+            if ref.value == 0:
+                output = "null pointer"
+            else:
+                array = state.heap[ref]
+                assert isinstance(array, jvmc.HeapArray), f"expected array, but got {array}"
+                frame.stack.push(jvmc.StackInt(len(array.values)))
+                frame.pc += 1
+
+        case jvm.Dup():
+            v = frame.stack.pop()
+            frame.stack.push(v)
+            frame.stack.push(v)
+            frame.pc += 1
+
 
         case jvm.Get(static=True, field=field):
             # Hack - Only handle the assertion case
@@ -70,6 +143,54 @@ def step(bc: jpamb.Bytecode, state: jvmc.State) -> tuple[jvmc.PC, jvmc.State | s
 
             # Hack - Assuming assertions are never disabled
             frame.stack.push(jvmc.StackInt(0))
+            frame.pc += 1
+
+        case jvm.Ifz(condition=op, target=target):
+            value = frame.stack.pop()
+            assert isinstance(value, jvmc.StackInt), f"expected int, but got {value}"
+
+            if compare(op, value.value, 0):
+                frame.pc %= target
+            else:
+                frame.pc += 1
+
+        case jvm.If(condition=op, target=target):
+            v2, v1 = frame.stack.pop(), frame.stack.pop()
+            assert isinstance(v1, jvmc.StackInt), f"expected int, but got {v1}"
+            assert isinstance(v2, jvmc.StackInt), f"expected int, but got {v2}"
+            if compare(op, v1.value, v2.value):
+                frame.pc %= target
+            else:
+                frame.pc += 1
+
+        case jvm.Load(type=t, index=n):
+            v = frame.locals[n]
+            assert v is not None, f"loading uninitialized local {n}"
+            frame.stack.push(v)
+            frame.pc += 1
+
+        case jvm.ArrayLoad(type=t):
+            index, ref = frame.stack.pop(), frame.stack.pop()
+            assert isinstance(index, jvmc.StackInt), f"expected int, but got {index}"
+            assert isinstance(ref, jvmc.StackReference), f"expected reference, but got {ref}"
+
+            if ref.value == 0:
+                output = "null pointer"
+            else:
+                array = state.heap[ref]
+                assert isinstance(array, jvmc.HeapArray), f"expected array, but got {array}"
+                if 0 <= index.value < len(array.values):
+                    frame.stack.push(jvmc.StackInt(array.values[index.value]))
+                    frame.pc += 1
+                else:
+                    output = "out of bounds"
+
+        case jvm.NewArray(type=jvm.Int(), offset=offset, dim=dim):
+            size = frame.stack.pop()
+            # assert isinstance(size, jvmc.StackInt), f"expected int, but got {size}"
+            array = jvmc.HeapArray(jvm.Int(), [0] * size.value)
+            ref = state.heap.new(array)
+            frame.stack.push(ref)
             frame.pc += 1
 
         case jvm.New(classname=jvm.ClassName("java.lang.AssertionError")):
