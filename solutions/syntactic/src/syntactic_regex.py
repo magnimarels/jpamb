@@ -20,6 +20,7 @@ def main():
 
     log = logging
     log.basicConfig(level=logging.DEBUG)
+    log.debug(Path.cwd())
 
     suite, _ = jpamb.setup()
 
@@ -55,6 +56,30 @@ def main():
         log.debug("No assertion")
         print("assertion error;not-found")
 
+    # for q in jpamb.QUERIES:
+    #     if q != "assertion error":
+    #         print(f"{q};skip")
+
+
+    divide_or_end = re.search(r"/|(^\s*})", rest, re.MULTILINE)
+
+    if not divide_or_end:
+        log.error("Could not find end of method or divide")
+        log.error(rest)
+        sys.exit(1)
+
+    log.debug(f"found divide {divide_or_end}")
+    divide_found = divide_or_end.group(0) == "/"
+
+    if divide_found:
+        log.debug("Found divide")
+        print("divide by zero;found-div")
+    else:
+        log.debug("No divide")
+        print("divide by zero;not-found-div")
+
+        
+
     for q in jpamb.QUERIES:
-        if q != "assertion error":
+        if q != "assertion error" and q != "divide by zero":
             print(f"{q};skip")
