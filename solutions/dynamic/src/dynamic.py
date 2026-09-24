@@ -19,6 +19,11 @@ def binary(op, v1: int, v2: int) -> int | str:
             return v1 - v2
         case jvm.BinaryOpr.Mul:
             return v1 * v2
+        case jvm.BinaryOpr.Rem:
+            try:
+                return v1 % v2
+            except ZeroDivisionError:
+                return "divide by zero"
         case a:
             raise NotImplementedError(f"Unhandled binary {op!r}")
 
@@ -40,6 +45,13 @@ def compare(op, v1: int, v2: int) -> bool:
         case _:
             raise NotImplementedError(f"Unhandled comparation {op!r}")
 
+def truncate(value: int, bits: int, signed: bool) -> int:
+    mask = (1 << bits) - 1
+    value &= mask
+    if signed and value >= (1 << (bits - 1)):
+        value -= 1 << bits
+    return value
+
 
 def step(bc: jpamb.Bytecode, state: jvmc.State) -> tuple[jvmc.PC, jvmc.State | str]:
     assert isinstance(state, jvmc.State), f"expected state but got {state}"
@@ -50,16 +62,18 @@ def step(bc: jpamb.Bytecode, state: jvmc.State) -> tuple[jvmc.PC, jvmc.State | s
     print(f"Stepping {pc}:\n > {opr}", file=sys.stderr)
     match opr:
         case jvm.Push(type=t, value=v):
-            if t is jvm.Int():
-                frame.stack.push(jvmc.StackInt(v))
-            # elif t is jvm.Char():
-            #     frame.stack.push(jvmc.StackChar(v))
-            elif t is jvm.Boolean():
-                frame.stack.push(jvmc.StackInt(1 if v else 0))
-            elif t is jvm.Reference():  
-                frame.stack.push(jvmc.StackReference(v))
-            else:
-                raise NotImplementedError(f"Unhandled push type: {t} value: {v}")
+            match t:
+                case jvm.Int():
+                    frame.stack.push(jvmc.StackInt(v))
+                case jvm.Boolean():
+                    frame.stack.push(jvmc.StackInt(1 if v else 0))
+                case jvm.Char():
+                    frame.stack.push(jvmc.StackInt(ord(v)))
+                case jvm.Reference():
+                    frame.stack.push(jvmc.StackReference(v))
+                case _:
+                    ref = state.heap.new(jvmc.HeapString(v))
+                    frame.stack.push(ref)
             frame.pc += 1
 
         case jvm.Binary(type=jvm.Int(), operant=op):
@@ -135,6 +149,95 @@ def step(bc: jpamb.Bytecode, state: jvmc.State) -> tuple[jvmc.PC, jvmc.State | s
             frame.stack.push(v)
             frame.stack.push(v)
             frame.pc += 1
+
+        case jvm.Incr(index=n, amount=v):
+            local = frame.locals[n]
+            assert isinstance(local, jvmc.StackInt), f"expected int, but got {local}"
+            frame.locals[n] = jvmc.StackInt(local.value + v)
+            frame.pc += 1
+
+        case jvm.Goto(target=target):
+            frame.pc %= target
+
+        case jvm.InvokeStatic(method=methodid):
+            callee = bc.getmethod(methodid)
+            new_frame = jvmc.Frame.from_method(callee)
+            nparams = len(methodid.extension.params)
+            args = [frame.stack.pop() for _ in range(nparams)]
+            for i, v in enumerate(reversed(args)):
+                new_frame.locals[i] = v
+            state.frames.push(new_frame)
+
+        case jvm.InvokeVirtual(method=methodid):
+            cn = methodid.classname
+            name = methodid.extension.name
+
+            if cn == jvm.ClassName("java.lang.String") and name == "equals":
+                other_ref = frame.stack.pop()
+                this_ref = frame.stack.pop()
+                assert isinstance(this_ref, jvmc.StackReference), f"expected reference, but got {this_ref}"
+                this_str = state.heap[this_ref]
+                assert isinstance(this_str, jvmc.HeapString), f"expected string, but got {this_str}"
+
+                if isinstance(other_ref, jvmc.StackReference) and other_ref.value != 0:
+                    other = state.heap[other_ref]
+                    result = isinstance(other, jvmc.HeapString) and other.content == this_str.content
+                else:
+                    result = False
+
+                frame.stack.push(jvmc.StackInt(1 if result else 0))
+                frame.pc += 1
+
+            else:
+                callee = bc.getmethod(methodid)
+                new_frame = jvmc.Frame.from_method(callee)
+                nparams = len(methodid.extension.params)
+                args = [frame.stack.pop() for _ in range(nparams)]
+                ref = frame.stack.pop()
+                assert isinstance(ref, jvmc.StackReference), f"expected reference, but got {ref}"
+
+                if ref.value == 0:
+                    output = "null pointer"
+                else:
+                    obj = state.heap[ref]
+                    assert isinstance(obj, jvmc.HeapObject), f"expected object, but got {obj}"
+                    if obj.classname != methodid.extension.classname:
+                        output = "class cast"
+                    else:
+                        new_frame.locals[0] = ref
+                        for i, v in enumerate(reversed(args)):
+                            new_frame.locals[i + 1] = v
+                        state.frames.push(new_frame)
+
+        case jvm.Cast(from_=jvm.Int(), to_=t):
+            v = frame.stack.pop()
+            assert isinstance(v, jvmc.StackInt), f"expected int, but got {v}"
+            match t:
+                case jvm.Short():
+                    value = truncate(v.value, 16, signed=True)
+                case jvm.Byte():
+                    value = truncate(v.value, 8, signed=True)
+                case jvm.Char():
+                    value = truncate(v.value, 16, signed=False)
+                case a:
+                    raise NotImplementedError(f"Unhandled cast target {a!r}")
+            frame.stack.push(jvmc.StackInt(value))
+            frame.pc += 1
+
+        case jvm.Cast(from_=jvm.Reference(), to_=t):
+            v = frame.stack.pop()
+            assert isinstance(v, jvmc.StackReference), f"expected reference, but got {v}"
+            if v.value == 0:
+                frame.stack.push(v)
+                frame.pc += 1
+            else:
+                obj = state.heap[v]
+                assert isinstance(obj, jvmc.HeapObject), f"expected object, but got {obj}"
+                if obj.classname == t.extension.name:
+                    frame.stack.push(v)
+                    frame.pc += 1
+                else:
+                    output = "class cast"
 
 
         case jvm.Get(static=True, field=field):
@@ -241,7 +344,7 @@ def interpret():
     methodid, input, max_steps = jpamb.getcase(
         "dynamic",
         "1.0",
-        "The Rice Theorem Cookers",
+        "Cooked-Pikachu",
         ["dynamic", "python"],
         for_science=True,
     )
@@ -284,7 +387,7 @@ def analyse():
     methodid = jpamb.getmethodid(
         "dynamic",
         "1.0",
-        "The Rice Theorem Cookers",
+        "Cooked-Pikachu",
         ["dynamic", "python"],
         for_science=True,
     )
@@ -317,5 +420,7 @@ def analyse():
                 print(f"{query};timeout")
             else:
                 print(f"{query};found")
+        if len(input.inputs) == 0:
+            print(f"{query};no")
         else:
             print(f"{query};not-found")
