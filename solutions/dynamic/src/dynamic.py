@@ -399,11 +399,11 @@ def analyse():
 
     import random
 
-    # Make the randomness deterministic
     rand = random.Random(0)
 
+    no_params = len(methodid.extension.params) == 0
+
     behaviors = set()
-    # Try 10 random inputs
     for i in range(10):
         input = fuzz_input(rand, methodid)
         state = initial(bc, methodid, input)
@@ -420,7 +420,7 @@ def analyse():
                 print(f"{query};timeout")
             else:
                 print(f"{query};found")
-        if len(input.inputs) == 0:
+        elif no_params:
             print(f"{query};no")
         else:
             print(f"{query};not-found")
