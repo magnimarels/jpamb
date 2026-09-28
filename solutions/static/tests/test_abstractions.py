@@ -48,20 +48,39 @@ def arithmetic(opr, x, y):
     match opr:
         case jvm.BinaryOpr.Add:
             return jvms.StackInt(x.value + y.value)
+        case jvm.BinaryOpr.Sub:
+            return jvms.StackInt(x.value - y.value)
+        case jvm.BinaryOpr.Mul:
+            return jvms.StackInt(x.value * y.value)
+        case jvm.BinaryOpr.Div:
+            if y.value != 0:
+                q = abs(x.value) // abs(y.value)
+                if (x.value < 0) != (y.value < 0):
+                    q = -q
+                return jvms.StackInt(q)
+            return jvms.StackInt(0)
+        case jvm.BinaryOpr.Rem:
+            if y.value != 0:
+                r = abs(x.value) % abs(y.value)
+                if x.value < 0:
+                    r = -r
+                return jvms.StackInt(r)
+            return jvms.StackInt(0)
         case _:
             raise NotImplementedError("TODO")
 
 
 @given(
-    st.sampled_from([jvm.BinaryOpr.Add]),
+    st.sampled_from([jvm.BinaryOpr.Add, jvm.BinaryOpr.Sub, jvm.BinaryOpr.Mul, jvm.BinaryOpr.Div, jvm.BinaryOpr.Rem]),
     st.sets(st_stack_ints()),
-    st.sets(
-        st_stack_ints(),
-    ),
+    st.sets(st_stack_ints()),
 )
 def test_signset_arithmetic(
     opr: jvm.BinaryOpr, xs: set[jvms.StackInt], ys: set[jvms.StackInt]
 ):
+    if opr in (jvm.BinaryOpr.Div, jvm.BinaryOpr.Rem):
+        ys = {y for y in ys if y.value != 0}
+
     real = ab.SignSet.abstract(arithmetic(opr, x, y) for x in xs for y in ys)
     (abstracted, _errs) = ab.SignSet.abstract(xs).arithmetic(
         ab.SignSet.abstract(ys), opr
@@ -69,16 +88,27 @@ def test_signset_arithmetic(
     assert real <= abstracted
 
 
+
 def compare(opr, x, y):
     match opr:
         case jvm.CmpOpr.Le:
             return x.value <= y.value
+        case jvm.CmpOpr.Ge:
+            return x.value >= y.value
+        case jvm.CmpOpr.Eq:
+            return x.value == y.value
+        case jvm.CmpOpr.Ne:
+            return x.value != y.value
+        case jvm.CmpOpr.Lt:
+            return x.value < y.value
+        case jvm.CmpOpr.Gt:
+            return x.value > y.value
         case _:
             raise NotImplementedError("TODO")
 
 
 @given(
-    st.sampled_from([jvm.CmpOpr.Le]),
+    st.sampled_from([jvm.CmpOpr.Le, jvm.CmpOpr.Ge, jvm.CmpOpr.Eq, jvm.CmpOpr.Ne, jvm.CmpOpr.Lt, jvm.CmpOpr.Gt]),
     st.sets(st_stack_ints()),
     st.sets(
         st_stack_ints(),

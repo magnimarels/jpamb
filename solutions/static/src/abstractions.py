@@ -224,7 +224,7 @@ class SignSet(Abstraction, Lattice):
                     if -1 in other.signs:
                         output.update([0, 1])
                 if 0 in self.signs:
-                    output.update(other.signs)
+                    output.update(-y for y in other.signs) 
 
                 return (SignSet(output), set())
             case jvm.BinaryOpr.Mul:
@@ -239,56 +239,65 @@ class SignSet(Abstraction, Lattice):
                 return (SignSet(output), set())
             case jvm.BinaryOpr.Div:
                 output = set()
+                nonzero_other = other.signs - {0}
+
                 if 1 in self.signs:
-                    output.update(other.signs)
+                    if 1 in nonzero_other:
+                        output.update([0, 1])
+                    if -1 in nonzero_other:
+                        output.update([0, -1])
                 if -1 in self.signs:
-                    output.update(-x for x in other.signs)
-                if 0 in self.signs:
+                    if 1 in nonzero_other:
+                        output.update([0, -1])
+                    if -1 in nonzero_other:
+                        output.update([0, 1])
+                if 0 in self.signs and nonzero_other:
                     output.add(0)
 
                 return (SignSet(output), set())
+
+            case jvm.BinaryOpr.Rem:
+                output = set()
+                errs = set()
+                nonzero_other = other.signs - {0}
+
+                if nonzero_other:
+                    if 1 in self.signs:
+                        output.update([0, 1])
+                    if -1 in self.signs:
+                        output.update([0, -1])
+                    if 0 in self.signs:
+                        output.add(0)
+
+                if 0 in other.signs:
+                    errs.add("divide by zero")
+
+                return (SignSet(output), errs)
             case _:
                 raise NotImplementedError(f"TODO: {opr}")
 
     def compare(self, other: "SignSet", opr: jvm.CmpOpr) -> Iterable[bool]:
-        match opr:
-            case jvm.CmpOpr.Le:
-                cases = set()
-                for x in self.signs:
-                    for y in other.signs:
-                        if x == 0 or y == 0:
-                            cases.add(x <= y)
-                            continue
-                        if x <= y:
-                            cases.add(True)
-                        if x >= y:
-                            cases.add(False)
-                return cases
-            case jvm.CmpOpr.Ge:
-                cases = set()
-                for x in self.signs:
-                    for y in other.signs:
-                        if x == 0 or y == 0:
-                            cases.add(x >= y)
-                            continue
-                        if x >= y:
-                            cases.add(True)
-                        if x <= y:
-                            cases.add(False)
-                return cases
-            case jvm.CmpOpr.Eq:
-                cases = set()
-                for x in self.signs:
-                    for y in other.signs:
-                        if x == 0 or y == 0:
-                            cases.add(x == y)
-                            continue
-                        if x == y:
-                            cases.add(True)
+        def evaluate(opr, x, y):
+            match opr:
+                case jvm.CmpOpr.Le: return x <= y
+                case jvm.CmpOpr.Ge: return x >= y
+                case jvm.CmpOpr.Eq: return x == y
+                case jvm.CmpOpr.Lt: return x < y
+                case jvm.CmpOpr.Gt: return x > y
+                case jvm.CmpOpr.Ne: return x != y
+                case _:
+                    raise NotImplementedError(f"TODO: {opr}")
 
-                return cases
-            case _:
-                raise NotImplementedError(f"TODO: {opr}")
+        cases = set()
+        for x in self.signs:
+            for y in other.signs:
+                if x == 0 or y == 0 or x != y:
+                    cases.add(evaluate(opr, x, y))
+                else:
+                    cases.add(True)
+                    cases.add(False)
+
+        return cases
 
 
 from collections.abc import Iterable
