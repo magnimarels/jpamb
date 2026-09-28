@@ -104,6 +104,9 @@ def manystep(
             # Hack -- if we create an assertion error, we probably also throw it.
             yield "assertion error"
 
+        case a:
+            raise NotImplementedError(a.help())
+
 
 def initialstate(
     bc: jpamb.Bytecode,

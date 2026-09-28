@@ -213,6 +213,40 @@ class SignSet(Abstraction, Lattice):
                     output.update(other.signs)
 
                 return (SignSet(output), set())
+            case jvm.BinaryOpr.Sub:
+                output = set()
+                if 1 in self.signs:
+                    output.add(1)
+                    if 1 in other.signs:
+                        output.update([0, -1])
+                if -1 in self.signs:
+                    output.add(-1)
+                    if -1 in other.signs:
+                        output.update([0, 1])
+                if 0 in self.signs:
+                    output.update(other.signs)
+
+                return (SignSet(output), set())
+            case jvm.BinaryOpr.Mul:
+                output = set()
+                if 1 in self.signs:
+                    output.update(other.signs)
+                if -1 in self.signs:
+                    output.update(-x for x in other.signs)
+                if 0 in self.signs:
+                    output.add(0)
+
+                return (SignSet(output), set())
+            case jvm.BinaryOpr.Div:
+                output = set()
+                if 1 in self.signs:
+                    output.update(other.signs)
+                if -1 in self.signs:
+                    output.update(-x for x in other.signs)
+                if 0 in self.signs:
+                    output.add(0)
+
+                return (SignSet(output), set())
             case _:
                 raise NotImplementedError(f"TODO: {opr}")
 
@@ -229,6 +263,29 @@ class SignSet(Abstraction, Lattice):
                             cases.add(True)
                         if x >= y:
                             cases.add(False)
+                return cases
+            case jvm.CmpOpr.Ge:
+                cases = set()
+                for x in self.signs:
+                    for y in other.signs:
+                        if x == 0 or y == 0:
+                            cases.add(x >= y)
+                            continue
+                        if x >= y:
+                            cases.add(True)
+                        if x <= y:
+                            cases.add(False)
+                return cases
+            case jvm.CmpOpr.Eq:
+                cases = set()
+                for x in self.signs:
+                    for y in other.signs:
+                        if x == 0 or y == 0:
+                            cases.add(x == y)
+                            continue
+                        if x == y:
+                            cases.add(True)
+
                 return cases
             case _:
                 raise NotImplementedError(f"TODO: {opr}")
