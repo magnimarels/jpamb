@@ -106,6 +106,87 @@ def manystep(
             # Hack -- if we create an assertion error, we probably also throw it.
             yield "assertion error"
 
+        case jvm.Push(value=v):
+            va = SignSet.abstract([StackInt(v)])
+            yield (pc + 1, state.push(va))
+
+        case jvm.NewArray(type=t, dim=dim):
+            if dim != 1:
+                raise NotImplementedError(f"NewArray with dim={dim} not supported")
+
+            [count], after = state.pop(1)
+            if -1 in count.signs:
+                yield "negative array size"
+            if count.signs - {-1}:
+                yield (pc + 1, after.push(SignSet.from_sign("+")))
+
+        case jvm.Dup():
+            [top], after = state.pop(1)
+            yield (pc + 1, after.push(top).push(top))
+
+
+        case jvm.Store(index=i):
+            [value], after = state.pop(1)
+            yield (pc + 1, after.store(i, value))
+
+        case jvm.ArrayStore(type=t):
+            [arr, index, value], after = state.pop(3)
+            non_null_arr = arr.signs - {0}
+
+            if 0 in arr.signs:
+                yield "null pointer"
+
+            if non_null_arr:
+                if -1 in index.signs:
+                    yield "out of bounds"
+                if index.signs - {-1}:
+                    yield "out of bounds"
+                    yield (pc + 1, after)
+
+        case jvm.ArrayLength():
+            [arr], after = state.pop(1)
+            if 0 in arr.signs:
+                yield "null pointer"
+            if arr.signs - {0}:
+                yield (pc + 1, after.push(SignSet.from_sign("0+")))
+
+        case jvm.ArrayLoad(type=t):
+            [arr, index], after = state.pop(2)
+            non_null_arr = arr.signs - {0}
+
+            if 0 in arr.signs:
+                yield "null pointer"
+
+            if non_null_arr:
+                if -1 in index.signs:
+                    yield "out of bounds"
+                if index.signs - {-1}:
+                    yield "out of bounds"
+                    yield (pc + 1, after.push(SignSet.top()))
+
+        case jvm.If(condition=op, target=target):
+            [v1, v2], after = state.pop(2)
+            for res in SignSet.compare(v1, v2, op):
+                match res:
+                    case True:
+                        yield (pc % target, after)
+                    case False:
+                        yield (pc + 1, after)
+                    case err:
+                        yield err
+
+        case jvm.Incr(index=i, amount=amount):
+            va = state.load(i)
+            result, errs = SignSet.arithmetic(va, SignSet.abstract([StackInt(amount)]), jvm.BinaryOpr.Add)
+
+            for err in errs:
+                yield err
+
+            if result.signs:
+                yield (pc + 1, state.store(i, result))
+
+                
+
         case a:
             raise NotImplementedError(a.help())
 
