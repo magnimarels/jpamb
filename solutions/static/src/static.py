@@ -1,7 +1,8 @@
+import heapq
+import itertools
 import sys
-from collections import deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from abstractions import SignSet
 
@@ -95,20 +96,42 @@ def manystep(
             if result.signs:
                 yield (pc + 1, after.push(result))
 
-        case jvm.Return(type=None):
-            yield "ok"
-
-        case jvm.Return(type=t):
-            # Hack -- we assume that we always return.
-            yield "ok"
 
         case jvm.New(classname=jvm.ClassName("java.lang.AssertionError")):
             # Hack -- if we create an assertion error, we probably also throw it.
             yield "assertion error"
 
+        case jvm.Push(value=None):
+            # References are sign sets too: {0} is null, {+} is non-null.
+            yield (pc + 1, state.push(SignSet.from_sign("0")))
+
+        case jvm.Push(value=str()):
+            # A string constant is a non-null reference.
+            yield (pc + 1, state.push(SignSet.from_sign("+")))
+
         case jvm.Push(value=v):
             va = SignSet.abstract([StackInt(v)])
             yield (pc + 1, state.push(va))
+
+        case jvm.InvokeVirtual(method=m) if m.classname == jvm.ClassName(
+            "java.lang.String"
+        ):
+            # We don't track string contents, so only model the methods we
+            # know are pure and only fail on a null receiver.
+            name = m.extension.name
+            nargs = len(m.extension.params)
+            [receiver, *_], after = state.pop(nargs + 1)
+
+            if 0 in receiver.signs:
+                yield "null pointer"
+            if receiver.signs - {0}:
+                match name:
+                    case "equals":
+                        yield (pc + 1, after.push(SignSet.from_sign("0+")))
+                    case "length":
+                        yield (pc + 1, after.push(SignSet.from_sign("0+")))
+                    case _:
+                        raise NotImplementedError(f"String.{name} not supported")
 
         case jvm.NewArray(type=t, dim=dim):
             if dim != 1:
@@ -187,6 +210,19 @@ def manystep(
 
                 
 
+        case jvm.Cast(from_=jvm.Int(), to_=to):
+            [val], after = state.pop(1)
+            match to:
+                case jvm.Short() | jvm.Byte():
+                    # Truncation can flip the sign or hit zero (e.g. 65536 -> 0)
+                    result = val if val.signs <= {0} else SignSet.top()
+                case jvm.Char():
+                    # Char is unsigned 16-bit
+                    result = val if val.signs <= {0} else SignSet.from_sign("0+")
+                case _:
+                    raise NotImplementedError(f"Cast from int to {to} not supported")
+            yield (pc + 1, after.push(result))
+
         case a:
             raise NotImplementedError(a.help())
 
@@ -209,7 +245,8 @@ def initialstate(
                     locals[i] = SignSet.abstract([StackInt(int(value))])
                 case jpamb.case.Int(value=value):
                     locals[i] = SignSet.abstract([StackInt(int(value))])
-                case jpamb.case.Array():
+                case jpamb.case.Array() | jpamb.case.String():
+                    # A concrete array/string input is a non-null reference.
                     locals[i] = SignSet.from_sign("+")
                 case _:
                     raise NotImplementedError(f"Unsupported value {x!r}")
@@ -217,39 +254,129 @@ def initialstate(
     state = State(tuple(locals), ())
     return {PC(methodid, 0): state}
 
+class Worklist:
+
+    def __init__(self, pcs: Iterable[PC] = ()):
+        self.heap: list[tuple[int, int, int, PC]] = []
+        self.pending: set[PC] = set()
+        self.stepped: set[PC] = set()
+        self.counter = 0
+        for pc in pcs:
+            self.push(pc)
+
+    def push(self, pc: PC):
+        if pc in self.pending:
+            return
+        self.pending.add(pc)
+        self.counter += 1
+        key = (pc in self.stepped, pc.offset, self.counter, pc)
+        heapq.heappush(self.heap, key)
+
+    def pop(self) -> PC:
+        *_, pc = heapq.heappop(self.heap)
+        self.pending.remove(pc)
+        self.stepped.add(pc)
+        return pc
+
+    def __contains__(self, pc: PC):
+        return pc in self.pending
+
+    def __bool__(self):
+        return bool(self.heap)
+
 
 @dataclass
 class AbstractInterpreter:
     bc: jpamb.Bytecode
-    worklist: deque[PC]
+    entry: jvm.AbsMethodID
+    worklist: Worklist
     states: dict[PC, State]
+    callers: dict[jvm.AbsMethodID, set[PC]] = field(default_factory=dict)
+    returns: dict[jvm.AbsMethodID, SignSet | None] = field(default_factory=dict)
+    reported: set[tuple[PC, str]] = field(default_factory=set)
 
     @staticmethod
     def initial(bc: jpamb.Bytecode, methodid: jvm.AbsMethodID, inputs):
         states = initialstate(bc, methodid, inputs)
-        worklist = deque(states.keys())
+        worklist = Worklist(states.keys())
 
-        return AbstractInterpreter(bc, worklist, states)
+        return AbstractInterpreter(bc, methodid, worklist, states)
+
+    def invoke(self, pc: PC, m: jvm.AbsMethodID, state: State):
+        nargs = len(m.extension.params)
+        if nargs:
+            args, after = state.pop(nargs)
+        else:
+            args, after = (), state
+
+        self.callers.setdefault(m, set()).add(pc)
+
+        method = self.bc.getmethod(m)
+        locals = tuple(args) + (SignSet.bot(),) * (method.max_locals - nargs)
+        yield (PC(m, 0), State(locals, ()))
+
+        if m in self.returns:
+            ret = self.returns[m]
+            yield (pc + 1, after if ret is None else after.push(ret))
+
+    def ret(self, pc: PC, opr: jvm.Return, state: State):
+        m = pc.method
+        if m == self.entry:
+            yield "ok"
+
+        value = None if opr.type is None else state.pop(1)[0][0]
+
+        if m in self.returns:
+            before = self.returns[m]
+            new = None if value is None else before | value
+            changed = new != before
+        else:
+            new, changed = value, True
+
+        if changed:
+            self.returns[m] = new
+            for site in self.callers.get(m, ()):
+                self.worklist.push(site)
 
     def step(self) -> tuple[PC, set[str]]:
         pc = self.worklist.popleft()
 
-        print(f"Stepping {pc}:\n > {self.bc[pc]}", file=sys.stderr)
+        opr = self.bc[pc]
+        print(f"Stepping {pc}:\n > {opr}", file=sys.stderr)
+
+        state = self.states[pc]
+        match opr:
+            case jvm.InvokeStatic(method=m):
+                results = self.invoke(pc, m, state)
+                if m == pc.method:
+                    results = itertools.chain(["*"], results)
+            case jvm.Return():
+                results = self.ret(pc, opr, state)
+            case _:
+                results = manystep(self.bc, pc, state)
 
         finals = set()
 
-        for res in manystep(self.bc, pc, self.states[pc]):
+        for res in results:
             if isinstance(res, str):
-                finals.add(res)
+                if (pc, res) not in self.reported:
+                    self.reported.add((pc, res))
+                    finals.add(res)
             else:
                 pc_, st = res
+
+                # A back edge (loop) or a recursive call might never
+                # terminate, so soundly report "*".
+                if pc_.method == pc.method and pc_.offset <= pc.offset:
+                    if (pc, "*") not in self.reported:
+                        self.reported.add((pc, "*"))
+                        finals.add("*")
 
                 before = self.states.get(pc_, None)
                 after = st if before is None else before | st
                 if before is None or after != before:
                     self.states[pc_] = after
-                    if pc_ not in self.worklist:
-                        self.worklist.append(pc_)
+                    self.worklist.push(pc_)
 
         return pc, finals
 
@@ -273,9 +400,13 @@ def interpret():
     while steps > 0 and ai.worklist:
         pc, final = ai.step()
         for f in final:
+            if steps <= 0:
+                return
             jpamb.emit_step(x, pc, f, depth=1)
             steps -= 1
 
+        if steps <= 0:
+            return
         x = jpamb.emit_step(x, pc, ai.states, depth=1)
         steps -= 1
 
