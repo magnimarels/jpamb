@@ -339,7 +339,7 @@ class AbstractInterpreter:
                 self.worklist.push(site)
 
     def step(self) -> tuple[PC, set[str]]:
-        pc = self.worklist.popleft()
+        pc = self.worklist.pop()
 
         opr = self.bc[pc]
         print(f"Stepping {pc}:\n > {opr}", file=sys.stderr)
