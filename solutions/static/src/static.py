@@ -232,7 +232,7 @@ class AbstractInterpreter:
         return AbstractInterpreter(bc, worklist, states)
 
     def step(self) -> tuple[PC, set[str]]:
-        pc = self.worklist.pop()
+        pc = self.worklist.popleft()
 
         print(f"Stepping {pc}:\n > {self.bc[pc]}", file=sys.stderr)
 
@@ -245,13 +245,11 @@ class AbstractInterpreter:
                 pc_, st = res
 
                 before = self.states.get(pc_, None)
-                if before is None:
-                    after = st
-                else:
-                    after = before | st
+                after = st if before is None else before | st
                 if before is None or after != before:
                     self.states[pc_] = after
-                    self.worklist.append(pc_)
+                    if pc_ not in self.worklist:
+                        self.worklist.append(pc_)
 
         return pc, finals
 
@@ -261,7 +259,7 @@ def interpret():
     methodid, input, steps = jpamb.getcase(
         "static",
         "1.0",
-        "The Rice Theorem Cookers",
+        "Cooked-Pikachu",
         ["static", "python"],
         for_science=True,
     )
@@ -288,7 +286,7 @@ def analyse():
     methodid = jpamb.getmethodid(
         "static",
         "1.0",
-        "The Rice Theorem Cookers",
+        "Cooked-Pikachu",
         ["static", "python"],
         for_science=True,
     )
