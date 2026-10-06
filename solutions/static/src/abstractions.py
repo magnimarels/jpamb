@@ -254,7 +254,11 @@ class SignSet(Abstraction, Lattice):
                 if 0 in self.signs and nonzero_other:
                     output.add(0)
 
-                return (SignSet(output), set())
+                errs = set()
+                if 0 in other.signs:
+                    errs.add("divide by zero")
+
+                return (SignSet(output), errs)
 
             case jvm.BinaryOpr.Rem:
                 output = set()
